@@ -1,0 +1,41 @@
+{
+  "detector": {
+    "model": "yolov8n.pt",
+    "confidence_threshold": 0.5,
+    "person_class_id": 0
+  },
+  "tracker": {
+    "max_disappeared_frames": 30,
+    "max_match_distance": 80
+  },
+  "zones": [
+    {
+      "name": "Electronics",
+      "color": [0, 255, 255],
+      "points": [[100, 200], [400, 200], [400, 450], [100, 450]],
+      "dwell_alert_seconds": 15
+    },
+    {
+      "name": "Jewelry",
+      "color": [255, 0, 255],
+      "points": [[500, 150], [750, 150], [750, 400], [500, 400]],
+      "dwell_alert_seconds": 12
+    }
+  ],
+  "alerts": {
+    "dwell_time_default_seconds": 20,
+    "cooldown_seconds": 30,
+    "log_file": "alerts.log"
+  },
+  "display": {
+    "window_name": "Retail Anomaly Detection",
+    "show_trails": true,
+    "trail_length": 40,
+    "info_panel_width": 280
+  },
+  "web_server": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 5000
+  }
+}

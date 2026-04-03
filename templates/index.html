@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Surveillance Dashboard</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+
+  <!-- ── Header ─────────────────────────────────────────────────────── -->
+  <header>
+    <div class="logo">
+      <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+        <path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>
+      </svg>
+      <span class="logo-text">AI SURVEILLANCE</span>
+    </div>
+    <div class="status-bar">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">CONNECTING</span>
+      <span class="sep">|</span>
+      <span>Uptime&nbsp;<strong id="uptime">—</strong></span>
+      <span class="sep">|</span>
+      <span id="clock">—</span>
+    </div>
+  </header>
+
+  <!-- ── Main content ───────────────────────────────────────────────── -->
+  <main>
+    <div class="grid">
+
+      <!-- Live video -->
+      <div class="panel video-panel">
+        <div class="panel-header">
+          <span>LIVE FEED</span>
+          <span class="live-badge">● LIVE</span>
+        </div>
+        <div class="video-wrap">
+          <img id="video-feed" src="/video_feed" alt="Live feed" />
+        </div>
+      </div>
+
+      <!-- Right sidebar -->
+      <aside class="sidebar">
+
+        <!-- Stat cards -->
+        <div class="stats-row">
+          <div class="stat-card">
+            <div class="stat-val" id="stat-people">—</div>
+            <div class="stat-lbl">TRACKED</div>
+          </div>
+          <div class="stat-card danger">
+            <div class="stat-val" id="stat-today">—</div>
+            <div class="stat-lbl">TODAY</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-val" id="stat-fps">—</div>
+            <div class="stat-lbl">FPS</div>
+          </div>
+          <div class="stat-card accent">
+            <div class="stat-val" id="stat-hour">—</div>
+            <div class="stat-lbl">LAST HR</div>
+          </div>
+        </div>
+
+        <!-- Active alerts -->
+        <div class="panel">
+          <div class="panel-header">
+            <span>ACTIVE ALERTS</span>
+            <span class="badge" id="alert-badge">0</span>
+          </div>
+          <div class="alert-feed" id="alert-feed">
+            <p class="empty">No active alerts</p>
+          </div>
+        </div>
+
+        <!-- Zones -->
+        <div class="panel">
+          <div class="panel-header">MONITORING ZONES</div>
+          <div class="zone-list" id="zone-list">
+            <p class="empty">Loading&hellip;</p>
+          </div>
+        </div>
+
+      </aside>
+    </div>
+
+    <!-- Alert history table -->
+    <div class="panel history-panel">
+      <div class="panel-header">
+        <span>ALERT HISTORY</span>
+        <button class="btn" onclick="exportCSV()">&#8659; Export CSV</button>
+      </div>
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Person</th>
+              <th>Zone</th>
+              <th>Dwell</th>
+              <th>Threshold</th>
+            </tr>
+          </thead>
+          <tbody id="history-body">
+            <tr><td colspan="5" class="empty">Loading&hellip;</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script src="/static/js/app.js"></script>
+</body>
+</html>
