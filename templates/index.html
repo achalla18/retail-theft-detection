@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <title>AerialGuard — Drone Intrusion Detection</title>
+  <title>AerialGuard — Aerial Security Platform</title>
   <link rel="stylesheet" href="/static/css/style.css"/>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
 <!-- ═══════════════════════════════════════════════════════════ HEADER -->
-<header>
-  <div class="logo">
+<header id="app-header">
+  <div class="hdr-left">
     <svg class="logo-icon" viewBox="0 0 32 32" fill="none">
       <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="1.5"/>
       <circle cx="16" cy="16" r="7"  stroke="currentColor" stroke-width="1.2"/>
@@ -21,121 +21,191 @@
       <line x1="16" y1="22" x2="16" y2="30" stroke="currentColor" stroke-width="1.5"/>
       <circle cx="16" cy="16" r="2" fill="currentColor"/>
     </svg>
-    <span class="logo-text">AERIALGUARD</span>
+    <div class="logo-text">
+      <span class="logo-name">AERIALGUARD</span>
+      <span class="logo-sub">Aerial Security Platform v2</span>
+    </div>
   </div>
 
   <nav class="tab-nav">
-    <button class="tab-btn active" data-page="live">Live Monitoring</button>
-    <button class="tab-btn"        data-page="incidents">Incident Review</button>
-    <button class="tab-btn"        data-page="analytics">Flight Analytics</button>
+    <button class="tab-btn active" data-page="live">
+      <svg viewBox="0 0 16 16" fill="none"><circle cx="8" cy="8" r="6" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>
+      Live Airspace
+    </button>
+    <button class="tab-btn" data-page="tactical">
+      <svg viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M8 5v3l2 2" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+      Tactical Map
+    </button>
+    <button class="tab-btn" data-page="incidents">
+      <svg viewBox="0 0 16 16" fill="none"><path d="M3 12L8 3l5 9H3z" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
+      Incidents
+    </button>
+    <button class="tab-btn" data-page="analytics">
+      <svg viewBox="0 0 16 16" fill="none"><polyline points="2,12 6,7 10,9 14,4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      Flight Analytics
+    </button>
+    <button class="tab-btn" data-page="alerts">
+      <svg viewBox="0 0 16 16" fill="none"><path d="M8 2a5 5 0 015 5c0 3-1 4-1 5H4c0-1-1-2-1-5a5 5 0 015-5z" stroke="currentColor" stroke-width="1.5"/><line x1="6" y1="13" x2="10" y2="13" stroke="currentColor" stroke-width="1.5"/></svg>
+      Alert Queue
+      <span class="nav-badge" id="nav-alert-badge" style="display:none">0</span>
+    </button>
   </nav>
 
   <div class="hdr-right">
-    <span class="status-dot" id="status-dot"></span>
-    <span id="status-text">CONNECTING</span>
-    <span class="sep">|</span>
-    <span id="clock">—</span>
+    <div class="sys-status">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="status-text">CONNECTING</span>
+    </div>
+    <div class="hdr-stats">
+      <span class="hdr-stat"><span id="hdr-objects">—</span> tracked</span>
+      <span class="hdr-stat risk" id="hdr-risk-wrap">
+        RISK <span id="hdr-risk">—</span>
+      </span>
+    </div>
+    <span id="clock" class="clock">—</span>
   </div>
 </header>
 
+<!-- Alert banner (shown when alerts fire) -->
+<div id="alert-banner" class="alert-banner hidden">
+  <span class="alert-banner-icon">⚠</span>
+  <span id="alert-banner-text">Alert</span>
+  <button onclick="dismissBanner()">✕</button>
+</div>
 
-<!-- ═══════════════════════════════════════════════════ PAGE 1: LIVE -->
+
+<!-- ══════════════════════════════════════════ PAGE 1: LIVE AIRSPACE -->
 <section id="page-live" class="page active">
-  <div class="live-grid">
+  <div class="live-layout">
 
-    <!-- Video + risk badge -->
-    <div class="panel video-panel">
-      <div class="panel-hdr">
-        <span>LIVE FEED</span>
-        <span class="live-badge">● LIVE</span>
-      </div>
-      <div class="video-wrap">
-        <img id="video-feed" src="/video_feed" alt="Live camera feed"/>
-        <div class="risk-badge" id="risk-badge">
-          <span class="risk-label">RISK</span>
+    <!-- Left: camera feed -->
+    <div class="live-feed-col">
+      <div class="panel feed-panel">
+        <div class="panel-hdr">
+          <span>LIVE CAMERA FEED</span>
+          <span class="live-dot-badge">● LIVE</span>
+        </div>
+        <div class="feed-wrap">
+          <img id="video-feed" src="/video_feed" alt="Live camera feed"/>
+        </div>
+        <!-- Risk bar under feed -->
+        <div class="risk-bar-row">
+          <span class="risk-label">THREAT LEVEL</span>
+          <div class="risk-bar-track">
+            <div class="risk-bar-fill" id="risk-bar-fill"></div>
+          </div>
           <span class="risk-val" id="risk-val">—</span>
         </div>
       </div>
     </div>
 
-    <!-- Right sidebar -->
-    <aside class="live-sidebar">
+    <!-- Right: sidebar panels -->
+    <div class="live-sidebar">
 
-      <!-- Stat cards row -->
+      <!-- System stats row -->
       <div class="stat-row">
         <div class="stat-card">
-          <div class="sv" id="sc-objects">—</div>
-          <div class="sl">TRACKED</div>
+          <div class="sv" id="sc-objects">—</div><div class="sl">TRACKED</div>
         </div>
-        <div class="stat-card danger">
-          <div class="sv" id="sc-inc-today">—</div>
-          <div class="sl">TODAY</div>
+        <div class="stat-card warn">
+          <div class="sv" id="sc-inc-today">—</div><div class="sl">TODAY</div>
         </div>
         <div class="stat-card">
-          <div class="sv" id="sc-fps">—</div>
-          <div class="sl">FPS</div>
+          <div class="sv" id="sc-fps">—</div><div class="sl">FPS</div>
         </div>
         <div class="stat-card accent">
-          <div class="sv" id="sc-alerts-hr">—</div>
-          <div class="sl">ALERTS/HR</div>
+          <div class="sv" id="sc-alerts-hr">—</div><div class="sl">ALERTS/HR</div>
         </div>
       </div>
 
-      <!-- Zone status cards -->
-      <div class="panel">
-        <div class="panel-hdr">ZONE STATUS</div>
-        <div id="zone-cards" class="zone-card-list">
-          <p class="empty">Loading zones&hellip;</p>
-        </div>
-      </div>
-
-      <!-- Active intrusions -->
+      <!-- Active object cards (risk-ranked) -->
       <div class="panel">
         <div class="panel-hdr">
-          <span>ACTIVE INTRUSIONS</span>
-          <span class="badge" id="intrusion-badge">0</span>
+          <span>ACTIVE AERIAL TRACKS</span>
+          <span class="badge" id="tracks-badge">0</span>
         </div>
-        <div id="intrusion-list" class="intrusion-list">
-          <p class="empty">No active intrusions</p>
-        </div>
-      </div>
-
-      <!-- Object stats -->
-      <div class="panel">
-        <div class="panel-hdr">OBJECT STATS</div>
-        <div id="object-stats" class="obj-stats-list">
+        <div id="active-tracks" class="active-tracks-list">
           <p class="empty">No objects detected</p>
         </div>
       </div>
 
+      <!-- Zone status -->
+      <div class="panel">
+        <div class="panel-hdr">AIRSPACE ZONES</div>
+        <div id="zone-cards" class="zone-card-list">
+          <p class="empty">Loading zones…</p>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+
+<!-- ══════════════════════════════════════════ PAGE 2: TACTICAL MAP -->
+<section id="page-tactical" class="page">
+  <div class="tactical-layout">
+    <div class="panel tactical-panel">
+      <div class="panel-hdr">
+        <span>TACTICAL AIRSPACE VIEW</span>
+        <div class="tactical-controls">
+          <label class="tac-toggle">
+            <input type="checkbox" id="tac-trails" checked/>
+            Show Trails
+          </label>
+          <label class="tac-toggle">
+            <input type="checkbox" id="tac-rings" checked/>
+            Proximity Rings
+          </label>
+          <label class="tac-toggle">
+            <input type="checkbox" id="tac-zones" checked/>
+            Zones
+          </label>
+        </div>
+      </div>
+      <canvas id="tactical-canvas" class="tactical-canvas"></canvas>
+    </div>
+    <aside class="tactical-sidebar">
+      <div class="panel">
+        <div class="panel-hdr">TRACK LEGEND</div>
+        <div id="tac-legend" class="tac-legend">
+          <p class="empty">No active tracks</p>
+        </div>
+      </div>
+      <div class="panel">
+        <div class="panel-hdr">ZONE INDEX</div>
+        <div id="tac-zones-list" class="tac-zones-list">
+          <p class="empty">No zones configured</p>
+        </div>
+      </div>
     </aside>
   </div>
 </section>
 
 
-<!-- ════════════════════════════════════════════════ PAGE 2: INCIDENTS -->
+<!-- ══════════════════════════════════════════ PAGE 3: INCIDENTS -->
 <section id="page-incidents" class="page">
 
-  <!-- Incident card grid -->
   <div id="incidents-view">
     <div class="page-toolbar">
-      <span class="page-title">INCIDENT REVIEW</span>
-      <button class="btn" onclick="loadIncidents()">&#8635; Refresh</button>
+      <span class="page-title">INCIDENT TIMELINE</span>
+      <div class="toolbar-actions">
+        <button class="btn" onclick="loadIncidents()">↻ Refresh</button>
+      </div>
     </div>
     <div id="incident-grid" class="incident-grid">
-      <p class="empty">Loading incidents&hellip;</p>
+      <p class="empty">Loading incidents…</p>
     </div>
   </div>
 
-  <!-- Incident detail (shown when card is clicked) -->
   <div id="incident-detail" class="detail-view" style="display:none">
     <div class="page-toolbar">
-      <button class="btn back-btn" onclick="closeDetail()">&#8592; Back to incidents</button>
-      <span class="page-title" id="detail-title">INC-000</span>
+      <button class="btn btn-back" onclick="closeDetail()">← Back</button>
+      <span class="page-title" id="detail-title">INC-0000</span>
+      <span class="detail-threat-badge" id="detail-threat-badge"></span>
     </div>
     <div class="detail-grid">
 
-      <!-- Video / no-clip placeholder -->
       <div class="panel detail-video-panel">
         <div class="panel-hdr">CLIP REPLAY</div>
         <div class="detail-video-wrap">
@@ -144,29 +214,28 @@
         </div>
       </div>
 
-      <!-- Trajectory chart -->
       <div class="panel">
-        <div class="panel-hdr">TRAJECTORY</div>
-        <div class="chart-wrap">
-          <canvas id="traj-chart"></canvas>
-        </div>
+        <div class="panel-hdr">FLIGHT PATH</div>
+        <div class="chart-wrap"><canvas id="traj-chart"></canvas></div>
       </div>
 
-      <!-- Stats table -->
       <div class="panel detail-stats-panel">
-        <div class="panel-hdr">INCIDENT STATS</div>
+        <div class="panel-hdr">INCIDENT STATISTICS</div>
         <table class="stats-tbl" id="detail-stats-tbl"></table>
       </div>
 
-      <!-- Alert timeline -->
       <div class="panel">
         <div class="panel-hdr">ALERT TIMELINE</div>
-        <div id="alert-timeline" class="alert-timeline"></div>
+        <div id="alert-timeline" class="alert-timeline-list"></div>
+      </div>
+
+      <div class="panel detail-summary-panel">
+        <div class="panel-hdr">FLIGHT PATH CHART</div>
+        <div class="chart-wrap"><canvas id="detail-speed-chart"></canvas></div>
       </div>
 
     </div>
 
-    <!-- Summary -->
     <div class="panel summary-panel">
       <div class="panel-hdr">AUTO-GENERATED SUMMARY</div>
       <p id="detail-summary" class="summary-text"></p>
@@ -175,30 +244,47 @@
 </section>
 
 
-<!-- ════════════════════════════════════════════════ PAGE 3: ANALYTICS -->
+<!-- ══════════════════════════════════════════ PAGE 4: FLIGHT ANALYTICS -->
 <section id="page-analytics" class="page">
   <div class="page-toolbar">
     <span class="page-title">FLIGHT ANALYTICS</span>
-    <label class="select-wrap">
-      <select id="analytics-range" onchange="refreshCharts()">
-        <option value="60">Last 60 s</option>
-        <option value="300">Last 5 min</option>
-        <option value="1800">Last 30 min</option>
-      </select>
-    </label>
+    <div class="toolbar-actions">
+      <label class="select-wrap">
+        Track: <select id="analytics-track-sel" onchange="onTrackSelected()">
+          <option value="">— select track —</option>
+        </select>
+      </label>
+      <label class="select-wrap">
+        Range: <select id="analytics-range" onchange="refreshCharts()">
+          <option value="60">Last 60 s</option>
+          <option value="300">Last 5 min</option>
+          <option value="1800">Last 30 min</option>
+          <option value="3600">Last 1 hr</option>
+        </select>
+      </label>
+      <button class="btn" onclick="refreshCharts()">↻ Refresh</button>
+    </div>
   </div>
 
-  <div class="chart-grid">
+  <div class="analytics-grid">
     <div class="panel chart-panel">
-      <div class="panel-hdr">SPEED vs TIME (m/s)</div>
+      <div class="panel-hdr">SPEED vs TIME  (m/s)</div>
       <div class="chart-wrap"><canvas id="chart-speed"></canvas></div>
     </div>
     <div class="panel chart-panel">
-      <div class="panel-hdr">ALTITUDE PROXY vs TIME (m)</div>
+      <div class="panel-hdr">ESTIMATED RANGE vs TIME  (m)</div>
       <div class="chart-wrap"><canvas id="chart-alt"></canvas></div>
     </div>
     <div class="panel chart-panel">
-      <div class="panel-hdr">CONFIDENCE vs TIME</div>
+      <div class="panel-hdr">ACCELERATION vs TIME  (m/s²)</div>
+      <div class="chart-wrap"><canvas id="chart-accel"></canvas></div>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-hdr">HEADING VOLATILITY</div>
+      <div class="chart-wrap"><canvas id="chart-heading"></canvas></div>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-hdr">DETECTION CONFIDENCE</div>
       <div class="chart-wrap"><canvas id="chart-conf"></canvas></div>
     </div>
     <div class="panel chart-panel">
@@ -207,12 +293,53 @@
     </div>
   </div>
 
-  <!-- Zone transition timeline -->
   <div class="panel">
     <div class="panel-hdr">ZONE TRANSITIONS</div>
-    <div id="zone-timeline" class="zone-timeline">
-      <p class="empty">No zone activity in the selected period.</p>
+    <div id="zone-timeline" class="zone-timeline-list">
+      <p class="empty">No zone activity in selected period.</p>
     </div>
+  </div>
+</section>
+
+
+<!-- ══════════════════════════════════════════ PAGE 5: ALERT QUEUE -->
+<section id="page-alerts" class="page">
+  <div class="page-toolbar">
+    <span class="page-title">ALERT QUEUE</span>
+    <div class="toolbar-actions">
+      <label class="select-wrap">
+        Filter: <select id="alert-filter" onchange="loadAlertQueue()">
+          <option value="">All</option>
+          <option value="active">Active</option>
+          <option value="monitoring">Monitoring</option>
+          <option value="escalated">Escalated</option>
+          <option value="resolved">Resolved</option>
+          <option value="archived">Archived</option>
+        </select>
+      </label>
+      <button class="btn" onclick="loadAlertQueue()">↻ Refresh</button>
+    </div>
+  </div>
+
+  <div class="alert-queue-table-wrap">
+    <table class="alert-queue-table">
+      <thead>
+        <tr>
+          <th>SEV</th>
+          <th>ID</th>
+          <th>TIMESTAMP</th>
+          <th>TYPE</th>
+          <th>TRACK</th>
+          <th>ZONE</th>
+          <th>INCIDENT</th>
+          <th>STATUS</th>
+          <th>ACTIONS</th>
+        </tr>
+      </thead>
+      <tbody id="alert-queue-body">
+        <tr><td colspan="9" class="empty">Loading alerts…</td></tr>
+      </tbody>
+    </table>
   </div>
 </section>
 
