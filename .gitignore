@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+env/
+
+# YOLOv8 model weights (large binaries — download separately)
+*.pt
+*.onnx
+
+# Runtime data
+data/
+alerts.log
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Claude Code session files
+.claude/

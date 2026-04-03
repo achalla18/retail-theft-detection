@@ -1,67 +1,49 @@
 # AerialGuard Drone Tracking System
 
-AerialGuard is a lightweight, dependency-minimal drone tracking project.
+AerialGuard is a lightweight computer-vision tracking core for drones. It performs centroid-based multi-object tracking and computes per-object movement statistics suitable for alerting, analytics, and downstream threat scoring.
 
-It includes:
-- A centroid-based multi-object tracker.
-- Full per-track drone statistics (time in frame, path, pixel speed, range estimate, 3D position, 3D speed, hover duration, closest approach).
-- A runnable CLI (`src/main.py`) for replaying detection frames.
-- Unit tests validating key metrics and lifecycle behavior.
+## What is implemented now
 
-## Implemented statistics
-
-For each object track:
+The tracker now computes these statistics per tracked drone:
 
 1. **Time in frame**
    - `time_in_frame_s = (last_seen_frame - first_seen_frame + 1) / fps`
 2. **Flight path**
-   - Ordered centroids over time (`trail`)
+   - Ordered list of centroids (`trail`) over time
 3. **Pixel speed**
    - `||c_t - c_(t-1)|| * fps` in pixels/second
-4. **Approximate range from camera** *(optional with intrinsics)*
+4. **Approximate range from camera** (optional, requires intrinsics + assumed drone width)
    - `z ≈ (fx * W_real) / w_pixels`
-5. **Approximate 3D camera-frame position** *(optional)*
+5. **Approximate 3D camera-frame position** (optional)
    - `X = ((u - cx) * z) / fx`
    - `Y = ((v - cy) * z) / fy`
    - `Z = z`
-6. **Approximate real-world speed** *(optional)*
+6. **Approximate real-world speed** (optional)
    - `||P_t - P_(t-1)|| / Δt` in m/s
-7. **Hover duration** *(optional)*
-   - Speed below threshold and inside spatial radius for at least a minimum time
-8. **Closest approach** *(optional)*
-   - `min(Z_t)` while the track exists
+7. **Hover duration** (optional)
+   - Speed below threshold while staying within a radius for at least minimum seconds
+8. **Closest approach** (optional)
+   - `min(Z_t)` over observed frames
 
-## Project layout
+> Notes:
+> - Pixel-domain metrics always work.
+> - Real-world (meter) metrics are approximations and depend on camera calibration quality and object size assumptions.
 
-- `src/tracker.py` — tracking + statistics core
-- `src/main.py` — runnable CLI
-- `tests/test_tracker.py` — unit tests
-- `sample_detections.json` — sample input frames
+## Quick usage
 
-## Quick start
+```python
+from src.tracker import CentroidTracker, CameraIntrinsics
 
-```bash
-python -m py_compile src/tracker.py src/main.py
-python src/main.py --input-json sample_detections.json --fps 30
+tracker = CentroidTracker(
+    fps=30.0,
+    camera_intrinsics=CameraIntrinsics(fx=1200, fy=1200, cx=960, cy=540),
+    assumed_drone_width_m=0.35,
+)
+
+# each frame
+tracked = tracker.update([
+    {"centroid": (810, 330), "bbox": (760, 300, 860, 360)},
+])
 ```
 
-With intrinsics enabled:
-
-```bash
-python src/main.py \
-  --input-json sample_detections.json \
-  --fps 30 \
-  --fx 1200 --fy 1200 --cx 640 --cy 360 \
-  --assumed-width-m 0.35
-```
-
-## Run tests
-
-```bash
-python -m unittest tests/test_tracker.py -v
-```
-
-## Notes
-
-- Pixel-domain statistics work without calibration.
-- Meter-domain statistics are approximations and improve with calibrated camera intrinsics and realistic drone-size assumptions.
+Each object in `tracked` includes `bbox`, `centroid`, `trail`, and a `stats` dictionary with derived metrics.

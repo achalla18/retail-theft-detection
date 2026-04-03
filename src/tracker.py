@@ -66,7 +66,6 @@ class CentroidTracker:
 
         # Per-object statistics state.
         self.stats: OrderedDict[int, dict[str, Any]] = OrderedDict()
-        self.completed_tracks: OrderedDict[int, dict[str, Any]] = OrderedDict()
 
     def _register(self, centroid: tuple[float, float], bbox: tuple[float, float, float, float]):
         obj_id = self.next_id
@@ -114,27 +113,11 @@ class CentroidTracker:
 
     def _deregister(self, obj_id: int):
         self._finalize_hover_if_active(obj_id)
-        self.completed_tracks[obj_id] = self._build_single_output(obj_id)
         del self.objects[obj_id]
         del self.disappeared[obj_id]
         del self.bboxes[obj_id]
         del self.trails[obj_id]
         del self.stats[obj_id]
-
-    def reset(self):
-        """Clear all live and completed tracker state."""
-        self.next_id = 0
-        self.objects.clear()
-        self.disappeared.clear()
-        self.bboxes.clear()
-        self.trails.clear()
-        self.stats.clear()
-        self.completed_tracks.clear()
-        self.frame_index = -1
-
-    def get_completed_tracks(self) -> dict[int, dict[str, Any]]:
-        """Return finalized tracks that left the scene."""
-        return dict(self.completed_tracks)
 
     def _bbox_width(self, bbox: tuple[float, float, float, float]) -> float:
         x1, _, x2, _ = bbox
@@ -242,19 +225,8 @@ class CentroidTracker:
                     self._deregister(obj_id)
             return self._build_output()
 
-        input_centroids = []
-        input_bboxes = []
-        for detection in detections:
-            if "centroid" not in detection or "bbox" not in detection:
-                raise ValueError("Each detection must contain 'centroid' and 'bbox'.")
-            centroid = tuple(detection["centroid"])
-            bbox = tuple(detection["bbox"])
-            if len(centroid) != 2:
-                raise ValueError("Detection centroid must contain exactly 2 values.")
-            if len(bbox) != 4:
-                raise ValueError("Detection bbox must contain exactly 4 values.")
-            input_centroids.append(centroid)
-            input_bboxes.append(bbox)
+        input_centroids = [tuple(d["centroid"]) for d in detections]
+        input_bboxes = [tuple(d["bbox"]) for d in detections]
 
         if len(self.objects) == 0:
             for cent, bbox in zip(input_centroids, input_bboxes):
@@ -318,7 +290,47 @@ class CentroidTracker:
         output: dict[int, dict[str, Any]] = {}
 
         for obj_id in self.objects:
-            output[obj_id] = self._build_single_output(obj_id)
+            s = self.stats[obj_id]
+            first_frame = s["first_seen_frame"]
+            last_frame = s["last_seen_frame"]
+            frame_count = last_frame - first_frame + 1
+            time_in_frame = frame_count / self.fps
+
+            hover_time = sum(seg["duration_s"] for seg in s["hover_segments"])
+            if s["active_hover_start_frame"] is not None:
+                hover_time += (self.frame_index - s["active_hover_start_frame"] + 1) / self.fps
+
+            output[obj_id] = {
+                "bbox": self.bboxes[obj_id],
+                "centroid": self.objects[obj_id],
+                "trail": list(self.trails[obj_id][-120:]),
+                "stats": {
+                    "first_seen_frame": first_frame,
+                    "last_seen_frame": last_frame,
+                    "time_in_frame_s": time_in_frame,
+                    "pixel_speed_current_px_s": s["pixel_speed_history"][-1]
+                    if s["pixel_speed_history"]
+                    else 0.0,
+                    "pixel_speed_avg_px_s": (sum(s["pixel_speed_history"]) / len(s["pixel_speed_history"]))
+                    if s["pixel_speed_history"]
+                    else 0.0,
+                    "estimated_distance_current_m": s["distance_history_m"][-1]
+                    if s["distance_history_m"]
+                    else None,
+                    "closest_distance_m": s["closest_distance_m"],
+                    "estimated_speed_current_mps": s["speed_3d_history_mps"][-1]
+                    if s["speed_3d_history_mps"]
+                    else None,
+                    "estimated_speed_avg_mps": (sum(s["speed_3d_history_mps"]) / len(s["speed_3d_history_mps"]))
+                    if s["speed_3d_history_mps"]
+                    else None,
+                    "hover_duration_s": hover_time,
+                    "hover_segments": list(s["hover_segments"]),
+                    "position_3d_current_m": s["position_3d_history_m"][-1]
+                    if s["position_3d_history_m"]
+                    else None,
+                },
+            }
 
         return output
 
