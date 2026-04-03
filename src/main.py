@@ -1,357 +1,398 @@
 """
-main.py — Retail Anomaly Detection System
+main.py — AerialGuard: AI Drone Intrusion Detection
 
-Entry point that ties together detection, tracking, zone monitoring,
-alert management, and the web dashboard into a real-time pipeline.
+Entry point that wires all subsystems into a real-time pipeline:
+  detection → analytics → zone monitoring → alerts → incidents → dashboard
 
-Usage:
-    python src/main.py                        # webcam + web dashboard
-    python src/main.py --source video.mp4     # video file
-    python src/main.py --no-gui               # headless (web only)
-    python src/main.py --port 8080            # custom web port
-    python src/main.py --calibrate            # zone coordinate helper
-    python src/main.py --config config/settings.json
+Usage
+─────
+  python src/main.py                       # webcam + web dashboard
+  python src/main.py --source video.mp4    # video file
+  python src/main.py --no-gui              # headless (web only)
+  python src/main.py --port 8080           # custom web port
+  python src/main.py --config config/settings.json
 """
 
 import argparse
 import json
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from detector import PersonDetector
-from tracker import CentroidTracker
-from zone_manager import ZoneManager
+from analytics import FlightAnalytics
+from detector import AerialDetector
+from zone_manager import AirspaceZoneManager
 from alert_manager import AlertManager
+from incident_manager import IncidentManager
 
 
 # ── Drawing helpers ───────────────────────────────────────────────────────────
 
-def draw_tracked_person(frame, person_id, obj_data, dwell_times,
-                        show_trails=True, trail_length=40):
-    """Draw bounding box, ID label, trail, and dwell info for one person."""
-    x1, y1, x2, y2 = obj_data["bbox"]
-
-    # Consistent HSV-derived color per ID
-    hue = (person_id * 47) % 180
-    color_bgr = cv2.cvtColor(
-        np.array([[[hue, 200, 255]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
+def _id_color(track_id: int):
+    hue = (track_id * 61) % 180
+    return cv2.cvtColor(
+        np.array([[[hue, 210, 255]]], dtype=np.uint8), cv2.COLOR_HSV2BGR
     )[0][0].tolist()
 
-    # Bounding box
-    cv2.rectangle(frame, (x1, y1), (x2, y2), color_bgr, 2)
 
-    # ID label
-    label = f"Person #{person_id}"
-    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-    cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), color_bgr, -1)
-    cv2.putText(frame, label, (x1 + 3, y1 - 4),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
+def draw_object(frame, info: dict, trail: deque, alert_active: bool):
+    x1, y1, x2, y2 = info["bbox"]
+    cx, cy = info["centroid"]
+    color  = _id_color(info["track_id"])
 
-    # Dwell time annotations
-    y_off = y2 + 18
-    for zone_name, seconds in dwell_times.items():
-        dwell_color = (0, 0, 255) if seconds > 10 else (200, 200, 200)
-        cv2.putText(frame, f"{zone_name}: {seconds}s", (x1, y_off),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, dwell_color, 1)
-        y_off += 16
+    # Trail
+    pts = list(trail)
+    for i in range(1, len(pts)):
+        a  = i / len(pts)
+        t1 = (int(pts[i - 1][0]), int(pts[i - 1][1]))
+        t2 = (int(pts[i][0]),     int(pts[i][1]))
+        cv2.line(frame, t1, t2, color, max(1, int(a * 2)))
 
-    # Movement trail
-    if show_trails and len(obj_data["trail"]) > 1:
-        trail = obj_data["trail"][-trail_length:]
-        for i in range(1, len(trail)):
-            alpha = i / len(trail)
-            pt1 = tuple(int(v) for v in trail[i - 1])
-            pt2 = tuple(int(v) for v in trail[i])
-            cv2.line(frame, pt1, pt2, color_bgr, max(1, int(alpha * 3)))
+    # Box — thicker + red glow when alert active
+    thick = 3 if alert_active else 2
+    if alert_active:
+        cv2.rectangle(frame, (x1 - 3, y1 - 3), (x2 + 3, y2 + 3), (0, 0, 200), 1)
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thick)
+
+    # Label
+    label = f"T{info['track_id']}  {info['confidence']:.0%}"
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.45, 1)
+    cv2.rectangle(frame, (x1, y1 - th - 6), (x1 + tw + 6, y1), color, -1)
+    cv2.putText(frame, label, (x1 + 3, y1 - 3),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 0), 1)
+
+    # Stats below box
+    y_off = y2 + 14
+    cv2.putText(frame, f"{info['speed']:.1f} m/s",
+                (x1, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 230, 255), 1)
+    y_off += 14
+    cv2.putText(frame, f"~{info['altitude_proxy']:.0f} m alt",
+                (x1, y_off), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 230, 255), 1)
+
+    # Status badges
+    y_off += 14
+    if info.get("hovering"):
+        cv2.putText(frame, "[HOVER]", (x1, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 165, 255), 1)
+        y_off += 13
+    if info.get("circling"):
+        cv2.putText(frame, "[CIRCLING]", (x1, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 165, 255), 1)
+        y_off += 13
+    for z in info.get("current_zones", []):
+        cv2.putText(frame, f"[{z}]", (x1, y_off),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.38, (0, 60, 220), 1)
+        y_off += 13
 
 
-def draw_info_panel(frame, tracked_count, fps, alerts, panel_width=280):
-    """Draw semi-transparent info panel on the right side of the frame."""
+def draw_hud(frame, fps: float, obj_count: int, risk: int,
+             active_alerts: list, panel_w: int = 290):
+    """Semi-transparent HUD panel on the right edge."""
     h, w = frame.shape[:2]
-    x0 = w - panel_width
+    x0 = w - panel_w
 
-    overlay = frame.copy()
-    cv2.rectangle(overlay, (x0, 0), (w, h), (20, 20, 20), -1)
-    cv2.addWeighted(overlay, 0.78, frame, 0.22, 0, frame)
+    ov = frame.copy()
+    cv2.rectangle(ov, (x0, 0), (w, h), (10, 18, 28), -1)
+    cv2.addWeighted(ov, 0.80, frame, 0.20, 0, frame)
 
-    cv2.putText(frame, "ANOMALY DETECTION", (x0 + 10, 28),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 180), 2)
-    cv2.line(frame, (x0 + 10, 36), (w - 10, 36), (60, 60, 60), 1)
+    # Brand
+    cv2.putText(frame, "AERIALGUARD", (x0 + 10, 26),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 210, 140), 2)
+    cv2.line(frame, (x0 + 10, 34), (w - 10, 34), (30, 50, 60), 1)
 
-    cv2.putText(frame, f"People:  {tracked_count}", (x0 + 10, 60),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1)
-    cv2.putText(frame, f"FPS:     {fps:.1f}", (x0 + 10, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.48, (190, 190, 190), 1)
+    # Risk score
+    risk_color = (
+        (0, 200, 80)   if risk < 30 else
+        (0, 165, 255)  if risk < 60 else
+        (0, 80, 220)
+    )
+    cv2.putText(frame, f"RISK  {risk:3d}/100", (x0 + 10, 58),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, risk_color, 1)
+    bar_w = int((w - 20 - x0) * risk / 100)
+    cv2.rectangle(frame, (x0 + 10, 64), (w - 10, 72), (30, 50, 60), -1)
+    cv2.rectangle(frame, (x0 + 10, 64), (x0 + 10 + bar_w, 72), risk_color, -1)
 
-    cv2.putText(frame, "RECENT ALERTS", (x0 + 10, 112),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 80, 255), 2)
-    cv2.line(frame, (x0 + 10, 120), (w - 10, 120), (60, 60, 60), 1)
+    # Stats
+    cv2.putText(frame, f"Objects: {obj_count}", (x0 + 10, 92),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 200, 210), 1)
+    cv2.putText(frame, f"FPS:     {fps:.1f}",   (x0 + 10, 110),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 200, 210), 1)
 
-    if not alerts:
-        cv2.putText(frame, "No alerts", (x0 + 10, 144),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (80, 80, 80), 1)
+    # Recent alerts
+    cv2.putText(frame, "ALERTS", (x0 + 10, 136),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.45, (60, 80, 220), 2)
+    cv2.line(frame, (x0 + 10, 143), (w - 10, 143), (30, 50, 60), 1)
+
+    if not active_alerts:
+        cv2.putText(frame, "None", (x0 + 10, 162),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 80, 80), 1)
     else:
-        y = 144
-        for alert in alerts[:5]:
-            age = time.time() - alert["timestamp"]
-            cv2.putText(frame, f"#{alert['person_id']} in {alert['zone']}",
-                        (x0 + 10, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (60, 120, 255), 1)
-            cv2.putText(frame, f"  {alert['dwell_seconds']}s  ({age:.0f}s ago)",
-                        (x0 + 10, y + 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.35, (120, 120, 120), 1)
-            y += 38
+        y = 162
+        for a in active_alerts[:5]:
+            age = int(time.time() - a["timestamp"])
+            text = f"T{a['track_id']} {a['rule']} ({age}s)"
+            cv2.putText(frame, text, (x0 + 10, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.38, (100, 130, 255), 1)
+            y += 20
 
 
-def draw_flash_alert(frame, alert):
-    """Flash a red border + banner when a new alert fires."""
+def draw_alert_flash(frame, alert: dict):
     h, w = frame.shape[:2]
-    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 220), 4)
-    text = f"ALERT: Person #{alert['person_id']} in {alert['zone']} ({alert['dwell_seconds']}s)"
-    (tw, _), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
-    cv2.putText(frame, text, ((w - tw) // 2, 34),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 220), 2)
+    cv2.rectangle(frame, (0, 0), (w - 1, h - 1), (0, 0, 200), 4)
+    msg = f"ALERT  T{alert['track_id']}  {alert['rule'].upper()}"
+    if alert.get("zone"):
+        msg += f"  [{alert['zone']}]"
+    (tw, _), _ = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.75, 2)
+    cv2.putText(frame, msg, ((w - tw) // 2, 38),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 220), 2)
 
 
-# ── Zone calibration helper ───────────────────────────────────────────────────
-
-def run_zone_calibration(source):
-    """Interactive mode: click the video to print zone corner coordinates."""
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        print("Error: Cannot open video source.")
-        return
-
-    ret, frame = cap.read()
-    if not ret:
-        print("Error: Cannot read from video source.")
-        cap.release()
-        return
-
-    points: list = []
-
-    def on_click(event, x, y, flags, param):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            points.append([x, y])
-            print(f"  Point {len(points)}: [{x}, {y}]")
-
-    win = "Zone Calibration — click corners, 'r' reset, 'q' quit"
-    cv2.namedWindow(win)
-    cv2.setMouseCallback(win, on_click)
-
-    print("\n=== ZONE CALIBRATION MODE ===")
-    print("Click corners on the video frame to record coordinates.")
-    print("Paste the printed points into config/settings.json.\n")
-
-    while True:
-        display = frame.copy()
-        for i, pt in enumerate(points):
-            cv2.circle(display, tuple(pt), 5, (0, 255, 0), -1)
-            cv2.putText(display, f"({pt[0]},{pt[1]})", (pt[0] + 8, pt[1] - 8),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
-            if i > 0:
-                cv2.line(display, tuple(points[i - 1]), tuple(pt), (0, 255, 0), 2)
-        if len(points) > 2:
-            cv2.line(display, tuple(points[-1]), tuple(points[0]), (0, 255, 0), 1)
-        cv2.putText(display, f"Points: {len(points)} | r=reset  q=quit",
-                    (10, 26), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-        cv2.imshow(win, display)
-        key = cv2.waitKey(30) & 0xFF
-        if key == ord("q"):
-            break
-        if key == ord("r"):
-            points.clear()
-            print("  Points reset.")
-
-    if points:
-        print(f"\nFinal points:\n  {points}")
-        print("Copy into config/settings.json  →  zones[*].points\n")
-
-    cap.release()
-    cv2.destroyAllWindows()
-
-
-# ── Main pipeline ─────────────────────────────────────────────────────────────
+# ── Pipeline ──────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Retail Anomaly Detection System")
-    parser.add_argument("--source", default="0",
-                        help="Webcam index (0) or path to video file")
-    parser.add_argument("--config", default="config/settings.json",
-                        help="Path to settings JSON")
-    parser.add_argument("--calibrate", action="store_true",
-                        help="Run interactive zone calibration mode")
-    parser.add_argument("--no-gui", action="store_true",
+    parser = argparse.ArgumentParser(description="AerialGuard Drone Intrusion Detection")
+    parser.add_argument("--source",    default="0",
+                        help="Webcam index or path to video file")
+    parser.add_argument("--config",    default="config/settings.json")
+    parser.add_argument("--no-gui",    action="store_true",
                         help="Disable OpenCV window (web dashboard only)")
-    parser.add_argument("--port", type=int, default=None,
+    parser.add_argument("--port",      type=int, default=None,
                         help="Web dashboard port (overrides config)")
     args = parser.parse_args()
 
-    # ── Load config ───────────────────────────────────────────────────
-    config_path = Path(args.config)
-    if not config_path.exists():
-        print(f"Error: config not found at {config_path}")
+    # ── Config ────────────────────────────────────────────────────────
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        print(f"Config not found: {cfg_path}")
         sys.exit(1)
-
-    with open(config_path, encoding="utf-8") as f:
-        config = json.load(f)
+    with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
 
     source = int(args.source) if args.source.isdigit() else args.source
 
-    if args.calibrate:
-        run_zone_calibration(source)
-        return
+    # ── Init components ───────────────────────────────────────────────
+    print("Initializing AerialGuard...")
 
-    # ── Initialize components ─────────────────────────────────────────
-    print("Initializing Retail Anomaly Detection System...")
-    print(f"  Source : {source}")
-
+    det_cfg = cfg["detector"]
     try:
-        detector = PersonDetector(
-            model_name=config["detector"]["model"],
-            confidence=config["detector"]["confidence_threshold"],
+        detector = AerialDetector(
+            model_name=det_cfg["model"],
+            confidence=det_cfg["confidence_threshold"],
+            iou_threshold=det_cfg.get("iou_threshold", 0.5),
+            tracker=det_cfg.get("tracker", "bytetrack.yaml"),
+            target_classes=det_cfg.get("target_classes"),
         )
-        print("  Detector : YOLOv8 loaded")
-    except Exception as exc:
-        print(f"  Error loading detector: {exc}")
+        print(f"  Detector : {det_cfg['model']} + {det_cfg.get('tracker','bytetrack')}")
+    except Exception as e:
+        print(f"  ERROR loading detector: {e}")
         sys.exit(1)
 
-    tracker = CentroidTracker(
-        max_disappeared=config["tracker"]["max_disappeared_frames"],
-        max_distance=config["tracker"]["max_match_distance"],
+    analytics = FlightAnalytics(
+        fps=cfg.get("video", {}).get("fps", 30),
+        calibration=cfg.get("analytics", {}).get("calibration"),
     )
 
-    zone_mgr = ZoneManager(config["zones"])
-    print(f"  Zones    : {len(config['zones'])} configured")
+    zone_mgr = AirspaceZoneManager(cfg["zones"])
+    print(f"  Zones    : {len(cfg['zones'])} airspace zones")
 
+    al_cfg = cfg.get("alerts", {})
     alert_mgr = AlertManager(
-        cooldown_seconds=config["alerts"]["cooldown_seconds"],
-        log_file=config["alerts"]["log_file"],
+        hover_threshold_s=al_cfg.get("hover_threshold_seconds", 5),
+        zone_cooldown_s=al_cfg.get("zone_entry_cooldown_seconds", 10),
+        hover_cooldown_s=al_cfg.get("hover_cooldown_seconds", 20),
+        circle_cooldown_s=al_cfg.get("circling_cooldown_seconds", 30),
+        log_file=al_cfg.get("log_file", "alerts.log"),
     )
 
-    display_cfg = config.get("display", {})
-    show_trails = display_cfg.get("show_trails", True)
-    trail_length = display_cfg.get("trail_length", 40)
-    panel_width = display_cfg.get("info_panel_width", 280)
-    window_name = display_cfg.get("window_name", "Retail Anomaly Detection")
-    show_gui = not args.no_gui
+    # Open video to get actual frame size before init-ing incident manager
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        print(f"  ERROR: Cannot open video source '{source}'")
+        sys.exit(1)
+
+    frame_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))  or 640
+    frame_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or 480
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    inc_mgr = IncidentManager(
+        fps=src_fps,
+        frame_size=(frame_w, frame_h),
+        disappear_s=al_cfg.get("incident_timeout_seconds", 4),
+        save_clips=al_cfg.get("clip_save_enabled", True),
+    )
 
     # ── Web dashboard ─────────────────────────────────────────────────
-    web_cfg = config.get("web_server", {})
-    web_enabled = web_cfg.get("enabled", True)
+    web_cfg  = cfg.get("web_server", {})
+    web_on   = web_cfg.get("enabled", True)
     web_host = web_cfg.get("host", "0.0.0.0")
     web_port = args.port if args.port is not None else web_cfg.get("port", 5000)
 
-    if web_enabled:
+    if web_on:
         import web_server
         web_server.start(host=web_host, port=web_port)
-        # Populate zone info for the web API
         web_server.shared_state.update_zones(zone_mgr.get_zones_info())
+        # Wire incident lifecycle events → SSE push
+        inc_mgr._event_cb = web_server.shared_state.push_event
         print(f"  Dashboard: http://localhost:{web_port}")
 
-    # ── Open video source ─────────────────────────────────────────────
-    cap = cv2.VideoCapture(source)
-    if not cap.isOpened():
-        print(f"Error: Cannot open video source '{source}'")
-        sys.exit(1)
+    # ── Display settings ──────────────────────────────────────────────
+    disp_cfg  = cfg.get("display", {})
+    show_gui  = not args.no_gui
+    win_name  = disp_cfg.get("window_name", "AerialGuard")
+    panel_w   = disp_cfg.get("hud_panel_width", 290)
 
     print("\nSystem running.")
-    if show_gui:
-        print("  Press 'q' in the video window to stop.")
-    else:
-        print("  Press Ctrl+C to stop.\n")
+    print("  Press Ctrl+C to stop." if not show_gui else
+          "  Press 'q' in the video window to stop.\n")
 
-    fps = 0.0
-    frame_count = 0
-    fps_start = time.time()
-    flash_until = 0.0
-    last_flash_alert = None
+    # ── Runtime state ─────────────────────────────────────────────────
+    # Trail history per track_id
+    trails: dict = {}          # {track_id: deque(maxlen=60)}
+    TRAIL_LEN = 60
+
+    fps          = 0.0
+    frame_count  = 0
+    fps_timer    = time.time()
+    flash_until  = 0.0
+    last_alert   = None
+
+    # Track-point sampling (persist every N frames)
+    TP_EVERY     = cfg.get("analytics", {}).get("track_point_sample_frames", 5)
+    frame_n      = 0
 
     try:
         while True:
             ret, frame = cap.read()
             if not ret:
-                if isinstance(source, str):   # loop video files
+                if isinstance(source, str):
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 break
 
-            # 1. Detect
+            now    = time.time()
+            frame_n += 1
+
+            # ── 1. Detect + track ─────────────────────────────────────
             try:
-                detections = detector.detect(frame)
+                detections = detector.track(frame)
             except Exception as exc:
-                print(f"Detection error: {exc}")
+                print(f"  Detection error: {exc}")
                 continue
 
-            # 2. Track
-            tracked = tracker.update(detections)
+            # ── 2. Analytics ──────────────────────────────────────────
+            analytics_map = analytics.update(detections, now)
 
-            # 3. Zone dwell
-            zone_alerts = zone_mgr.update(tracked)
+            # ── 3. Zone monitoring ────────────────────────────────────
+            zone_events = zone_mgr.update(analytics_map, now)
 
-            # 4. Alerts
-            new_alerts = alert_mgr.process_alerts(zone_alerts)
+            # Push zone membership back into analytics
+            for tid, info in analytics_map.items():
+                zones = zone_mgr.get_current_zones(tid)
+                analytics.set_zones(tid, zones)
+                info["current_zones"] = zones
+
+            # ── 4. Alert rules ────────────────────────────────────────
+            new_alerts = alert_mgr.process(analytics_map, zone_events)
             if new_alerts:
-                flash_until = time.time() + 2.0
-                last_flash_alert = new_alerts[-1]
+                flash_until = now + 2.0
+                last_alert  = new_alerts[-1]
                 for a in new_alerts:
-                    print(f"  >> ALERT: Person #{a['person_id']} in "
-                          f"{a['zone']} for {a['dwell_seconds']}s")
+                    print(f"  >> ALERT T{a['track_id']} rule={a['rule']}"
+                          f" zone={a.get('zone','—')}")
 
-                # Broadcast to web dashboard
-                if web_enabled:
-                    for a in new_alerts:
-                        web_server.shared_state.push_event(
-                            {"type": "alert", "data": a}
+            # ── 5. Incidents ──────────────────────────────────────────
+            inc_mgr.update(analytics_map, new_alerts, frame, now)
+
+            # ── 6. Persist track points (sampled) ─────────────────────
+            if frame_n % TP_EVERY == 0:
+                active_incs = {i["track_id"]: i["incident_id"]
+                               for i in inc_mgr.get_active_incidents()}
+                for tid, info in analytics_map.items():
+                    x1, y1, x2, y2 = info["bbox"]
+                    try:
+                        from database import insert_track_point
+                        insert_track_point(
+                            incident_id=active_incs.get(tid, 0),
+                            track_id=tid,
+                            timestamp=now,
+                            cx=info["centroid"][0],
+                            cy=info["centroid"][1],
+                            bbox_w=x2 - x1,
+                            bbox_h=y2 - y1,
+                            confidence=info["confidence"],
+                            speed=info["speed"],
+                            avg_speed=info["avg_speed"],
+                            altitude_proxy=info["altitude_proxy"],
+                            in_zones=info["current_zones"],
                         )
+                    except Exception:
+                        pass
 
-            # ── Draw overlays ─────────────────────────────────────────
+            # ── 7. Update trails ──────────────────────────────────────
+            active_tids = set(analytics_map.keys())
+            for tid in list(trails):
+                if tid not in active_tids:
+                    del trails[tid]
+            for tid, info in analytics_map.items():
+                if tid not in trails:
+                    trails[tid] = deque(maxlen=TRAIL_LEN)
+                trails[tid].append(info["centroid"])
+
+            # ── 8. Compute risk score ─────────────────────────────────
+            risk = analytics.compute_risk_score(
+                analytics_map, alert_mgr.get_display_alerts()
+            )
+
+            # ── 9. Draw overlays ──────────────────────────────────────
             zone_mgr.draw_zones(frame)
 
-            for pid, obj_data in tracked.items():
-                draw_tracked_person(
-                    frame, pid, obj_data,
-                    zone_mgr.get_dwell_times(pid),
-                    show_trails=show_trails,
-                    trail_length=trail_length,
-                )
+            alert_tids = {a["track_id"] for a in alert_mgr.get_display_alerts()}
+            for tid, info in analytics_map.items():
+                draw_object(frame, info, trails.get(tid, deque()),
+                            alert_active=(tid in alert_tids))
 
-            draw_info_panel(frame, len(tracked), fps,
-                            alert_mgr.get_display_alerts(), panel_width)
+            draw_hud(frame, fps, len(analytics_map), risk,
+                     alert_mgr.get_display_alerts(), panel_w)
 
-            if time.time() < flash_until and last_flash_alert:
-                draw_flash_alert(frame, last_flash_alert)
+            if now < flash_until and last_alert:
+                draw_alert_flash(frame, last_alert)
 
-            # ── FPS ───────────────────────────────────────────────────
+            # ── 10. FPS ───────────────────────────────────────────────
             frame_count += 1
-            elapsed = time.time() - fps_start
+            elapsed = now - fps_timer
             if elapsed >= 1.0:
-                fps = frame_count / elapsed
+                fps       = frame_count / elapsed
                 frame_count = 0
-                fps_start = time.time()
+                fps_timer = now
 
-            # ── Share annotated frame with web dashboard ──────────────
-            if web_enabled:
-                web_server.shared_state.update_stats(fps, len(tracked))
+            # ── 11. Share with web dashboard ──────────────────────────
+            if web_on:
                 web_server.shared_state.update_frame(frame)
+                web_server.shared_state.update_status(fps, len(analytics_map), risk)
+                web_server.shared_state.update_objects(analytics_map)
+                web_server.shared_state.update_zones(zone_mgr.get_zone_statuses())
 
-            # ── Local GUI ─────────────────────────────────────────────
+                # Push alert events to SSE
+                for a in new_alerts:
+                    web_server.shared_state.push_event({"type": "alert", "data": a})
+
+            # ── 12. Local GUI ─────────────────────────────────────────
             if show_gui:
-                cv2.imshow(window_name, frame)
+                cv2.imshow(win_name, frame)
                 if (cv2.waitKey(1) & 0xFF) == ord("q"):
                     break
 
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        print("\nStopped.")
     finally:
         cap.release()
         if show_gui:
             cv2.destroyAllWindows()
-        print("System stopped.")
+        print("AerialGuard stopped.")
 
 
 if __name__ == "__main__":

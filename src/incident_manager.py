@@ -1,0 +1,314 @@
+"""
+incident_manager.py — Incident lifecycle manager for AerialGuard.
+
+An "incident" covers the entire flight lifecycle of one tracked object:
+from first detection to when the track disappears for > timeout seconds.
+
+Responsibilities:
+  • Open an incident in the DB when a new track_id appears.
+  • Accumulate analytics (max/avg speed, zones entered, triggered rules).
+  • Write annotated video clips to  data/clips/inc_{id:05d}.mp4
+  • Save a thumbnail JPEG when the first alert fires.
+  • Close the incident and write a text summary when the track is gone.
+  • Emit lifecycle events ('incident_start', 'incident_end') for the
+    web dashboard via a provided callback.
+"""
+
+import json
+import time
+from pathlib import Path
+from typing import Callable, Dict, List, Optional
+
+import cv2
+import numpy as np
+
+
+_CLIPS_DIR = Path(__file__).parent.parent / "data" / "clips"
+
+
+class _ActiveIncident:
+    """Runtime state for one open incident."""
+
+    def __init__(
+        self,
+        incident_id: int,
+        track_id: int,
+        start_time: float,
+        frame_size: tuple,   # (width, height)
+        fps: float,
+        save_clips: bool,
+    ):
+        self.incident_id  = incident_id
+        self.track_id     = track_id
+        self.start_time   = start_time
+        self.last_seen    = start_time
+
+        # Accumulated analytics
+        self.max_speed    = 0.0
+        self._speed_sum   = 0.0
+        self._speed_cnt   = 0
+        self.frame_count  = 0
+        self.zones_entered: List[str] = []
+        self.triggered_rules: List[str] = []
+        self.thumb_saved  = False
+        self.entry_point: Optional[tuple] = None
+        self.exit_point:  Optional[tuple] = None
+
+        # Video writer
+        self._writer: Optional[cv2.VideoWriter] = None
+        if save_clips:
+            _CLIPS_DIR.mkdir(parents=True, exist_ok=True)
+            clip_path = _CLIPS_DIR / f"inc_{incident_id:05d}.mp4"
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            self._writer = cv2.VideoWriter(
+                str(clip_path), fourcc, fps, frame_size
+            )
+
+    def update(self, info: dict, alerts: List[dict], frame: np.ndarray):
+        """Feed one frame of data into this incident."""
+        self.last_seen  = time.time()
+        self.frame_count += 1
+
+        spd = info.get("speed", 0.0)
+        self.max_speed   = max(self.max_speed, spd)
+        self._speed_sum += spd
+        self._speed_cnt += 1
+
+        self.exit_point = info["centroid"]
+        if self.entry_point is None:
+            self.entry_point = info["centroid"]
+
+        # Track zones entered (unique)
+        for z in info.get("current_zones", []):
+            if z not in self.zones_entered:
+                self.zones_entered.append(z)
+
+        # Track triggered rules (unique)
+        for a in alerts:
+            if a["track_id"] == self.track_id:
+                rule = a["rule"]
+                if rule not in self.triggered_rules:
+                    self.triggered_rules.append(rule)
+
+                # Save thumbnail on first alert
+                if not self.thumb_saved:
+                    thumb_path = _CLIPS_DIR / f"inc_{self.incident_id:05d}_thumb.jpg"
+                    cv2.imwrite(str(thumb_path), frame)
+                    self.thumb_saved = True
+
+        # Write clip frame
+        if self._writer is not None:
+            self._writer.write(frame)
+
+    @property
+    def avg_speed(self) -> float:
+        return self._speed_sum / max(self._speed_cnt, 1)
+
+    def close(self, final_frame: np.ndarray | None = None):
+        if self._writer is not None:
+            if final_frame is not None:
+                self._writer.write(final_frame)
+            self._writer.release()
+            self._writer = None
+
+    def has_clip(self) -> bool:
+        path = _CLIPS_DIR / f"inc_{self.incident_id:05d}.mp4"
+        return path.exists() and path.stat().st_size > 0
+
+    def has_thumb(self) -> bool:
+        path = _CLIPS_DIR / f"inc_{self.incident_id:05d}_thumb.jpg"
+        return path.exists()
+
+
+def _generate_summary(inc: _ActiveIncident) -> str:
+    """Build a plain-English incident summary."""
+    duration = inc.last_seen - inc.start_time
+    parts: List[str] = [
+        f"Track #{inc.track_id} was detected at "
+        f"{time.strftime('%H:%M:%S', time.localtime(inc.start_time))}."
+    ]
+
+    if duration >= 1:
+        m, s = divmod(int(duration), 60)
+        parts.append(
+            f"The object was tracked for {f'{m}m {s}s' if m else f'{s}s'}."
+        )
+
+    if inc.max_speed >= 1.0:
+        parts.append(f"Maximum speed: {inc.max_speed:.1f} m/s.")
+
+    if inc.zones_entered:
+        parts.append(
+            f"Entered restricted zone(s): {', '.join(inc.zones_entered)}."
+        )
+
+    if "hover" in inc.triggered_rules:
+        parts.append("Object was detected hovering near the facility.")
+
+    if "circling" in inc.triggered_rules:
+        parts.append("Object was detected performing circling manoeuvres.")
+
+    if not inc.triggered_rules:
+        parts.append("No alert rules were triggered during this incident.")
+
+    return " ".join(parts)
+
+
+class IncidentManager:
+    """
+    Manages the full lifecycle of aerial intrusion incidents.
+
+    Args:
+        fps:          Video FPS (used for clip recording).
+        frame_size:   (width, height) of video frames.
+        disappear_s:  Seconds after last detection before closing an incident.
+        save_clips:   Whether to record MP4 clips (default True).
+        event_cb:     Optional callback(event_dict) called on lifecycle events.
+    """
+
+    def __init__(
+        self,
+        fps: float = 30.0,
+        frame_size: tuple = (640, 480),
+        disappear_s: float = 4.0,
+        save_clips: bool = True,
+        event_cb: Callable | None = None,
+    ):
+        self.fps         = fps
+        self.frame_size  = frame_size
+        self.disappear_s = disappear_s
+        self.save_clips  = save_clips
+        self._event_cb   = event_cb
+
+        self._active: Dict[int, _ActiveIncident] = {}   # track_id → incident
+
+        # DB
+        self._db_ok = False
+        try:
+            import database as _db
+            _db.init_db()
+            self._db_ok = True
+        except Exception:
+            pass
+
+    # ── Per-frame update ──────────────────────────────────────────────────────
+
+    def update(
+        self,
+        analytics: Dict[int, dict],
+        alerts: List[dict],
+        frame: np.ndarray,
+        timestamp: float,
+    ) -> List[dict]:
+        """
+        Call once per frame.  Returns list of lifecycle events
+        (incident_start, incident_end).
+        """
+        now    = timestamp
+        events: List[dict] = []
+        active_tids = set(analytics.keys())
+
+        # ── Open new incidents ────────────────────────────────────────
+        for tid, info in analytics.items():
+            if tid not in self._active:
+                inc_id = self._db_create(tid, now) if self._db_ok else id(object())
+                inc = _ActiveIncident(
+                    incident_id=inc_id,
+                    track_id=tid,
+                    start_time=now,
+                    frame_size=self.frame_size,
+                    fps=self.fps,
+                    save_clips=self.save_clips,
+                )
+                self._active[tid] = inc
+                ev = {
+                    "type":        "incident_start",
+                    "incident_id": inc_id,
+                    "track_id":    tid,
+                    "timestamp":   now,
+                }
+                events.append(ev)
+                if self._event_cb:
+                    self._event_cb(ev)
+
+        # ── Update active incidents ───────────────────────────────────
+        for tid, inc in list(self._active.items()):
+            if tid in analytics:
+                inc.update(analytics[tid], alerts, frame)
+
+        # ── Close disappeared incidents ───────────────────────────────
+        for tid in list(self._active):
+            if tid not in active_tids:
+                inc = self._active[tid]
+                if now - inc.last_seen >= self.disappear_s:
+                    inc.close()
+                    summary = _generate_summary(inc)
+                    if self._db_ok:
+                        self._db_close(inc, now, summary)
+                    ev = {
+                        "type":           "incident_end",
+                        "incident_id":    inc.incident_id,
+                        "track_id":       tid,
+                        "start_time":     inc.start_time,
+                        "end_time":       now,
+                        "duration":       round(now - inc.start_time, 1),
+                        "max_speed":      round(inc.max_speed, 2),
+                        "avg_speed":      round(inc.avg_speed, 2),
+                        "zones_entered":  inc.zones_entered,
+                        "triggered_rules": inc.triggered_rules,
+                        "summary":        summary,
+                        "has_clip":       inc.has_clip(),
+                        "has_thumb":      inc.has_thumb(),
+                    }
+                    events.append(ev)
+                    if self._event_cb:
+                        self._event_cb(ev)
+                    del self._active[tid]
+
+        return events
+
+    def get_active_incidents(self) -> List[dict]:
+        """Current open incidents for the web dashboard."""
+        now = time.time()
+        return [
+            {
+                "incident_id":    inc.incident_id,
+                "track_id":       inc.track_id,
+                "start_time":     inc.start_time,
+                "duration":       round(now - inc.start_time, 1),
+                "zones_entered":  inc.zones_entered,
+                "triggered_rules": inc.triggered_rules,
+                "max_speed":      round(inc.max_speed, 2),
+            }
+            for inc in self._active.values()
+        ]
+
+    # ── Database helpers ──────────────────────────────────────────────────────
+
+    def _db_create(self, track_id: int, start_time: float) -> int:
+        try:
+            import database as _db
+            return _db.create_incident(track_id, start_time)
+        except Exception:
+            return 0
+
+    def _db_close(self, inc: _ActiveIncident, end_time: float, summary: str):
+        try:
+            import database as _db
+            _db.close_incident(
+                incident_id=inc.incident_id,
+                end_time=end_time,
+                duration=round(end_time - inc.start_time, 1),
+                max_speed=round(inc.max_speed, 2),
+                avg_speed=round(inc.avg_speed, 2),
+                frame_count=inc.frame_count,
+                zones_entered=json.dumps(inc.zones_entered),
+                triggered_rules=json.dumps(inc.triggered_rules),
+                entry_point=json.dumps(list(inc.entry_point) if inc.entry_point else None),
+                exit_point=json.dumps(list(inc.exit_point) if inc.exit_point else None),
+                has_clip=inc.has_clip(),
+                has_thumb=inc.has_thumb(),
+                summary=summary,
+            )
+        except Exception:
+            pass

@@ -1,38 +1,60 @@
 {
   "detector": {
     "model": "yolov8n.pt",
-    "confidence_threshold": 0.5,
-    "person_class_id": 0
+    "confidence_threshold": 0.35,
+    "iou_threshold": 0.5,
+    "tracker": "bytetrack.yaml",
+    "target_classes": null,
+    "_note": "For best results swap model for a drone-specific weight trained on VisDrone. target_classes: null detects all; use [4,14] for airplane+bird as proxies."
   },
-  "tracker": {
-    "max_disappeared_frames": 30,
-    "max_match_distance": 80
+
+  "video": {
+    "fps": 30
   },
+
+  "analytics": {
+    "track_point_sample_frames": 5,
+    "calibration": {
+      "pixels_per_meter": 80,
+      "reference_bbox_height": 40,
+      "reference_altitude_m": 30,
+      "hover_speed_mps": 0.8,
+      "hover_confirm_s": 3.0,
+      "circle_window_s": 6.0,
+      "circle_min_rad": 1.8
+    }
+  },
+
   "zones": [
     {
-      "name": "Electronics",
-      "color": [0, 255, 255],
-      "points": [[100, 200], [400, 200], [400, 450], [100, 450]],
-      "dwell_alert_seconds": 15
+      "name": "Restricted Airspace",
+      "color": [0, 0, 220],
+      "points": [[100, 150], [500, 150], [500, 450], [100, 450]],
+      "alert_on_entry": true
     },
     {
-      "name": "Jewelry",
-      "color": [255, 0, 255],
-      "points": [[500, 150], [750, 150], [750, 400], [500, 400]],
-      "dwell_alert_seconds": 12
+      "name": "Perimeter Buffer",
+      "color": [0, 130, 255],
+      "points": [[520, 100], [750, 100], [750, 500], [520, 500]],
+      "alert_on_entry": false
     }
   ],
+
   "alerts": {
-    "dwell_time_default_seconds": 20,
-    "cooldown_seconds": 30,
+    "hover_threshold_seconds": 5,
+    "zone_entry_cooldown_seconds": 10,
+    "hover_cooldown_seconds": 20,
+    "circling_cooldown_seconds": 30,
+    "incident_timeout_seconds": 4,
+    "clip_save_enabled": true,
     "log_file": "alerts.log"
   },
+
   "display": {
-    "window_name": "Retail Anomaly Detection",
-    "show_trails": true,
-    "trail_length": 40,
-    "info_panel_width": 280
+    "window_name": "AerialGuard",
+    "hud_panel_width": 290
   },
+
   "web_server": {
     "enabled": true,
     "host": "0.0.0.0",

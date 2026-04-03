@@ -1,159 +1,183 @@
 """
-zone_manager.py — Define monitoring zones and track dwell time.
+zone_manager.py — Airspace zone monitoring for AerialGuard.
 
-Each zone is a polygon on the video frame. When a tracked person's
-centroid is inside a zone, their dwell time for that zone accumulates.
-If dwell time exceeds a threshold, an alert is triggered.
+Each zone is a polygon drawn over the camera frame.  When a tracked
+object's centroid enters or exits a zone, a zone-event dict is emitted.
+Dwell time inside each zone is accumulated per object.
 """
 
 import cv2
 import numpy as np
 import time
+from typing import Dict, List, Tuple
 
 
-class Zone:
-    """A single monitoring region."""
+class AirspaceZone:
+    """A single restricted-airspace polygon region."""
 
-    def __init__(self, name: str, points: list, color: tuple,
-                 alert_seconds: float = 20):
-        """
-        Args:
-            name: Label for this zone (e.g., "Electronics").
-            points: List of [x, y] polygon vertices.
-            color: BGR color tuple for display.
-            alert_seconds: Dwell time (seconds) before triggering alert.
-        """
-        self.name = name
-        self.points = np.array(points, dtype=np.int32)
-        self.color = tuple(color)
-        self.alert_seconds = alert_seconds
+    def __init__(
+        self,
+        name: str,
+        points: list,
+        color: Tuple,
+        alert_on_entry: bool = True,
+    ):
+        self.name           = name
+        self.points         = np.array(points, dtype=np.int32)
+        self.color          = tuple(color)          # BGR
+        self.alert_on_entry = alert_on_entry
 
-    def contains(self, point: tuple) -> bool:
-        """Check if a (cx, cy) point is inside this zone's polygon."""
-        result = cv2.pointPolygonTest(self.points, point, measureDist=False)
-        return result >= 0
+    def contains(self, point: Tuple[int, int]) -> bool:
+        res = cv2.pointPolygonTest(self.points, (float(point[0]), float(point[1])), False)
+        return res >= 0
+
+    @property
+    def color_hex(self) -> str:
+        b, g, r = self.color
+        return f"#{r:02x}{g:02x}{b:02x}"
 
 
-class ZoneManager:
-    """Manages all zones and per-person dwell time tracking."""
+class AirspaceZoneManager:
+    """Manages all airspace zones and per-object dwell tracking."""
 
     def __init__(self, zone_configs: list):
-        """
-        Args:
-            zone_configs: List of zone dicts from settings.json.
-        """
-        self.zones = []
+        self.zones: List[AirspaceZone] = []
         for zc in zone_configs:
-            self.zones.append(Zone(
+            self.zones.append(AirspaceZone(
                 name=zc["name"],
                 points=zc["points"],
-                color=zc.get("color", [0, 255, 0]),
-                alert_seconds=zc.get("dwell_alert_seconds", 20),
+                color=zc.get("color", [0, 0, 255]),
+                alert_on_entry=zc.get("alert_on_entry", True),
             ))
 
-        # Track dwell time per person per zone
-        # Structure: {person_id: {zone_name: {"enter_time": float, "total": float}}}
-        self.dwell_data = {}
+        # {track_id: {zone_name: {"inside": bool, "enter_time": float, "total": float}}}
+        self._dwell: Dict[int, Dict[str, dict]] = {}
+        # {track_id: set(zone_names)} — for entry/exit event detection
+        self._prev_membership: Dict[int, set] = {}
 
-    def update(self, tracked_objects: dict) -> list[dict]:
+    # ── Per-frame update ──────────────────────────────────────────────────────
+
+    def update(
+        self, analytics: Dict[int, dict], timestamp: float | None = None
+    ) -> List[dict]:
         """
-        Check each tracked person against all zones. Update dwell times.
+        Check each tracked object against all zones.
 
         Args:
-            tracked_objects: Output from CentroidTracker.update()
+            analytics:  {track_id: analytics_dict} from FlightAnalytics.update()
+            timestamp:  current time; defaults to time.time()
 
         Returns:
-            List of alert dicts for anyone exceeding dwell thresholds.
+            List of zone-event dicts:
+              {track_id, zone, event: 'enter'|'exit', timestamp, centroid,
+               dwell_seconds, alert_on_entry}
         """
-        now = time.time()
-        alerts = []
-        active_ids = set(tracked_objects.keys())
+        now = timestamp or time.time()
+        events: List[dict] = []
+        active_ids = set(analytics.keys())
 
-        # Clean up data for people who left the scene
-        stale_ids = [pid for pid in self.dwell_data if pid not in active_ids]
-        for pid in stale_ids:
-            del self.dwell_data[pid]
+        # Clean up disappeared tracks
+        for tid in list(self._dwell):
+            if tid not in active_ids:
+                del self._dwell[tid]
+        for tid in list(self._prev_membership):
+            if tid not in active_ids:
+                del self._prev_membership[tid]
 
-        for person_id, obj in tracked_objects.items():
-            centroid = obj["centroid"]
+        for tid, info in analytics.items():
+            cx, cy = info["centroid"]
+            self._dwell.setdefault(tid, {})
+            self._prev_membership.setdefault(tid, set())
 
-            if person_id not in self.dwell_data:
-                self.dwell_data[person_id] = {}
+            current_zones: set = set()
 
             for zone in self.zones:
-                zname = zone.name
-                inside = zone.contains(centroid)
+                inside = zone.contains((cx, cy))
+                zd = self._dwell[tid].setdefault(
+                    zone.name,
+                    {"inside": False, "enter_time": None, "total": 0.0},
+                )
 
-                if zname not in self.dwell_data[person_id]:
-                    self.dwell_data[person_id][zname] = {
-                        "enter_time": None,
-                        "total": 0.0,
-                        "alerted": False,
-                    }
-
-                zd = self.dwell_data[person_id][zname]
+                was_inside = tid in self._prev_membership and zone.name in self._prev_membership[tid]
 
                 if inside:
-                    if zd["enter_time"] is None:
-                        # Just entered the zone
+                    current_zones.add(zone.name)
+                    if not was_inside:
+                        # Entry event
+                        zd["inside"]     = True
                         zd["enter_time"] = now
-                    else:
-                        # Still in the zone — accumulate time
-                        zd["total"] = now - zd["enter_time"]
-
-                    # Check if dwell time exceeds threshold
-                    if zd["total"] >= zone.alert_seconds and not zd["alerted"]:
-                        zd["alerted"] = True
-                        alerts.append({
-                            "person_id": person_id,
-                            "zone": zname,
-                            "dwell_seconds": round(zd["total"], 1),
-                            "threshold": zone.alert_seconds,
-                            "centroid": centroid,
+                        events.append({
+                            "track_id":       tid,
+                            "zone":           zone.name,
+                            "event":          "enter",
+                            "timestamp":      now,
+                            "centroid":       (cx, cy),
+                            "dwell_seconds":  0.0,
+                            "alert_on_entry": zone.alert_on_entry,
                         })
+                    else:
+                        # Still inside — accumulate dwell
+                        if zd["enter_time"] is not None:
+                            zd["total"] = now - zd["enter_time"]
                 else:
-                    # Person left the zone — reset
-                    zd["enter_time"] = None
-                    zd["total"] = 0.0
-                    zd["alerted"] = False
+                    if was_inside:
+                        # Exit event
+                        dwell = zd["total"]
+                        zd["inside"]     = False
+                        zd["enter_time"] = None
+                        events.append({
+                            "track_id":      tid,
+                            "zone":          zone.name,
+                            "event":         "exit",
+                            "timestamp":     now,
+                            "centroid":      (cx, cy),
+                            "dwell_seconds": round(dwell, 1),
+                            "alert_on_entry": zone.alert_on_entry,
+                        })
 
-        return alerts
+            self._prev_membership[tid] = current_zones
 
-    def get_dwell_times(self, person_id: int) -> dict:
-        """Get current dwell times for a specific person across all zones."""
-        if person_id not in self.dwell_data:
-            return {}
-        result = {}
-        for zname, zd in self.dwell_data[person_id].items():
-            if zd["total"] > 0:
-                result[zname] = round(zd["total"], 1)
-        return result
+        return events
 
-    def get_zones_info(self) -> list[dict]:
-        """Return zone metadata for the web dashboard."""
-        result = []
-        for zone in self.zones:
-            b, g, r = zone.color
-            result.append({
-                "name": zone.name,
-                "alert_seconds": zone.alert_seconds,
-                "color_hex": f"#{r:02x}{g:02x}{b:02x}",
-                "points": zone.points.tolist(),
-            })
-        return result
+    # ── Accessors ─────────────────────────────────────────────────────────────
+
+    def get_current_zones(self, track_id: int) -> List[str]:
+        return list(self._prev_membership.get(track_id, set()))
+
+    def get_dwell(self, track_id: int, zone_name: str) -> float:
+        return self._dwell.get(track_id, {}).get(zone_name, {}).get("total", 0.0)
+
+    def get_zone_statuses(self) -> List[dict]:
+        """Return zone metadata + breach status for the web dashboard."""
+        breached = set()
+        for membership in self._prev_membership.values():
+            breached.update(membership)
+
+        return [
+            {
+                "name":           z.name,
+                "color_hex":      z.color_hex,
+                "alert_on_entry": z.alert_on_entry,
+                "status":         "BREACH" if z.name in breached else "CLEAR",
+                "points":         z.points.tolist(),
+            }
+            for z in self.zones
+        ]
+
+    def get_zones_info(self) -> List[dict]:
+        """Alias used by web_server for the /api/zones endpoint."""
+        return self.get_zone_statuses()
+
+    # ── Drawing ───────────────────────────────────────────────────────────────
 
     def draw_zones(self, frame: np.ndarray):
-        """Draw all zone polygons on the frame."""
         for zone in self.zones:
-            # Semi-transparent fill
             overlay = frame.copy()
             cv2.fillPoly(overlay, [zone.points], zone.color)
-            cv2.addWeighted(overlay, 0.15, frame, 0.85, 0, frame)
-
-            # Zone border
+            cv2.addWeighted(overlay, 0.12, frame, 0.88, 0, frame)
             cv2.polylines(frame, [zone.points], True, zone.color, 2)
 
-            # Zone label
+            # Label at first vertex
             x, y = zone.points[0]
             cv2.putText(frame, zone.name, (x + 5, y - 8),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, zone.color, 2)

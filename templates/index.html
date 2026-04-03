@@ -1,117 +1,222 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>AI Surveillance Dashboard</title>
-  <link rel="stylesheet" href="/static/css/style.css" />
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>AerialGuard — Drone Intrusion Detection</title>
+  <link rel="stylesheet" href="/static/css/style.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </head>
 <body>
 
-  <!-- ── Header ─────────────────────────────────────────────────────── -->
-  <header>
-    <div class="logo">
-      <svg class="logo-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
-        <path d="M12 2L2 7l10 5 10-5-10-5z"/>
-        <path d="M2 17l10 5 10-5M2 12l10 5 10-5"/>
-      </svg>
-      <span class="logo-text">AI SURVEILLANCE</span>
-    </div>
-    <div class="status-bar">
-      <span class="status-dot" id="status-dot"></span>
-      <span id="status-text">CONNECTING</span>
-      <span class="sep">|</span>
-      <span>Uptime&nbsp;<strong id="uptime">—</strong></span>
-      <span class="sep">|</span>
-      <span id="clock">—</span>
-    </div>
-  </header>
+<!-- ═══════════════════════════════════════════════════════════ HEADER -->
+<header>
+  <div class="logo">
+    <svg class="logo-icon" viewBox="0 0 32 32" fill="none">
+      <circle cx="16" cy="16" r="14" stroke="currentColor" stroke-width="1.5"/>
+      <circle cx="16" cy="16" r="7"  stroke="currentColor" stroke-width="1.2"/>
+      <line x1="2"  y1="16" x2="10" y2="16" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="22" y1="16" x2="30" y2="16" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="16" y1="2"  x2="16" y2="10" stroke="currentColor" stroke-width="1.5"/>
+      <line x1="16" y1="22" x2="16" y2="30" stroke="currentColor" stroke-width="1.5"/>
+      <circle cx="16" cy="16" r="2" fill="currentColor"/>
+    </svg>
+    <span class="logo-text">AERIALGUARD</span>
+  </div>
 
-  <!-- ── Main content ───────────────────────────────────────────────── -->
-  <main>
-    <div class="grid">
+  <nav class="tab-nav">
+    <button class="tab-btn active" data-page="live">Live Monitoring</button>
+    <button class="tab-btn"        data-page="incidents">Incident Review</button>
+    <button class="tab-btn"        data-page="analytics">Flight Analytics</button>
+  </nav>
 
-      <!-- Live video -->
-      <div class="panel video-panel">
-        <div class="panel-header">
-          <span>LIVE FEED</span>
-          <span class="live-badge">● LIVE</span>
+  <div class="hdr-right">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-text">CONNECTING</span>
+    <span class="sep">|</span>
+    <span id="clock">—</span>
+  </div>
+</header>
+
+
+<!-- ═══════════════════════════════════════════════════ PAGE 1: LIVE -->
+<section id="page-live" class="page active">
+  <div class="live-grid">
+
+    <!-- Video + risk badge -->
+    <div class="panel video-panel">
+      <div class="panel-hdr">
+        <span>LIVE FEED</span>
+        <span class="live-badge">● LIVE</span>
+      </div>
+      <div class="video-wrap">
+        <img id="video-feed" src="/video_feed" alt="Live camera feed"/>
+        <div class="risk-badge" id="risk-badge">
+          <span class="risk-label">RISK</span>
+          <span class="risk-val" id="risk-val">—</span>
         </div>
-        <div class="video-wrap">
-          <img id="video-feed" src="/video_feed" alt="Live feed" />
+      </div>
+    </div>
+
+    <!-- Right sidebar -->
+    <aside class="live-sidebar">
+
+      <!-- Stat cards row -->
+      <div class="stat-row">
+        <div class="stat-card">
+          <div class="sv" id="sc-objects">—</div>
+          <div class="sl">TRACKED</div>
+        </div>
+        <div class="stat-card danger">
+          <div class="sv" id="sc-inc-today">—</div>
+          <div class="sl">TODAY</div>
+        </div>
+        <div class="stat-card">
+          <div class="sv" id="sc-fps">—</div>
+          <div class="sl">FPS</div>
+        </div>
+        <div class="stat-card accent">
+          <div class="sv" id="sc-alerts-hr">—</div>
+          <div class="sl">ALERTS/HR</div>
         </div>
       </div>
 
-      <!-- Right sidebar -->
-      <aside class="sidebar">
-
-        <!-- Stat cards -->
-        <div class="stats-row">
-          <div class="stat-card">
-            <div class="stat-val" id="stat-people">—</div>
-            <div class="stat-lbl">TRACKED</div>
-          </div>
-          <div class="stat-card danger">
-            <div class="stat-val" id="stat-today">—</div>
-            <div class="stat-lbl">TODAY</div>
-          </div>
-          <div class="stat-card">
-            <div class="stat-val" id="stat-fps">—</div>
-            <div class="stat-lbl">FPS</div>
-          </div>
-          <div class="stat-card accent">
-            <div class="stat-val" id="stat-hour">—</div>
-            <div class="stat-lbl">LAST HR</div>
-          </div>
+      <!-- Zone status cards -->
+      <div class="panel">
+        <div class="panel-hdr">ZONE STATUS</div>
+        <div id="zone-cards" class="zone-card-list">
+          <p class="empty">Loading zones&hellip;</p>
         </div>
+      </div>
 
-        <!-- Active alerts -->
-        <div class="panel">
-          <div class="panel-header">
-            <span>ACTIVE ALERTS</span>
-            <span class="badge" id="alert-badge">0</span>
-          </div>
-          <div class="alert-feed" id="alert-feed">
-            <p class="empty">No active alerts</p>
-          </div>
+      <!-- Active intrusions -->
+      <div class="panel">
+        <div class="panel-hdr">
+          <span>ACTIVE INTRUSIONS</span>
+          <span class="badge" id="intrusion-badge">0</span>
         </div>
-
-        <!-- Zones -->
-        <div class="panel">
-          <div class="panel-header">MONITORING ZONES</div>
-          <div class="zone-list" id="zone-list">
-            <p class="empty">Loading&hellip;</p>
-          </div>
+        <div id="intrusion-list" class="intrusion-list">
+          <p class="empty">No active intrusions</p>
         </div>
+      </div>
 
-      </aside>
+      <!-- Object stats -->
+      <div class="panel">
+        <div class="panel-hdr">OBJECT STATS</div>
+        <div id="object-stats" class="obj-stats-list">
+          <p class="empty">No objects detected</p>
+        </div>
+      </div>
+
+    </aside>
+  </div>
+</section>
+
+
+<!-- ════════════════════════════════════════════════ PAGE 2: INCIDENTS -->
+<section id="page-incidents" class="page">
+
+  <!-- Incident card grid -->
+  <div id="incidents-view">
+    <div class="page-toolbar">
+      <span class="page-title">INCIDENT REVIEW</span>
+      <button class="btn" onclick="loadIncidents()">&#8635; Refresh</button>
+    </div>
+    <div id="incident-grid" class="incident-grid">
+      <p class="empty">Loading incidents&hellip;</p>
+    </div>
+  </div>
+
+  <!-- Incident detail (shown when card is clicked) -->
+  <div id="incident-detail" class="detail-view" style="display:none">
+    <div class="page-toolbar">
+      <button class="btn back-btn" onclick="closeDetail()">&#8592; Back to incidents</button>
+      <span class="page-title" id="detail-title">INC-000</span>
+    </div>
+    <div class="detail-grid">
+
+      <!-- Video / no-clip placeholder -->
+      <div class="panel detail-video-panel">
+        <div class="panel-hdr">CLIP REPLAY</div>
+        <div class="detail-video-wrap">
+          <video id="detail-video" controls style="display:none"></video>
+          <p id="no-clip-msg" class="empty">No clip recorded for this incident.</p>
+        </div>
+      </div>
+
+      <!-- Trajectory chart -->
+      <div class="panel">
+        <div class="panel-hdr">TRAJECTORY</div>
+        <div class="chart-wrap">
+          <canvas id="traj-chart"></canvas>
+        </div>
+      </div>
+
+      <!-- Stats table -->
+      <div class="panel detail-stats-panel">
+        <div class="panel-hdr">INCIDENT STATS</div>
+        <table class="stats-tbl" id="detail-stats-tbl"></table>
+      </div>
+
+      <!-- Alert timeline -->
+      <div class="panel">
+        <div class="panel-hdr">ALERT TIMELINE</div>
+        <div id="alert-timeline" class="alert-timeline"></div>
+      </div>
+
     </div>
 
-    <!-- Alert history table -->
-    <div class="panel history-panel">
-      <div class="panel-header">
-        <span>ALERT HISTORY</span>
-        <button class="btn" onclick="exportCSV()">&#8659; Export CSV</button>
-      </div>
-      <div class="tbl-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Time</th>
-              <th>Person</th>
-              <th>Zone</th>
-              <th>Dwell</th>
-              <th>Threshold</th>
-            </tr>
-          </thead>
-          <tbody id="history-body">
-            <tr><td colspan="5" class="empty">Loading&hellip;</td></tr>
-          </tbody>
-        </table>
-      </div>
+    <!-- Summary -->
+    <div class="panel summary-panel">
+      <div class="panel-hdr">AUTO-GENERATED SUMMARY</div>
+      <p id="detail-summary" class="summary-text"></p>
     </div>
-  </main>
+  </div>
+</section>
 
-  <script src="/static/js/app.js"></script>
+
+<!-- ════════════════════════════════════════════════ PAGE 3: ANALYTICS -->
+<section id="page-analytics" class="page">
+  <div class="page-toolbar">
+    <span class="page-title">FLIGHT ANALYTICS</span>
+    <label class="select-wrap">
+      <select id="analytics-range" onchange="refreshCharts()">
+        <option value="60">Last 60 s</option>
+        <option value="300">Last 5 min</option>
+        <option value="1800">Last 30 min</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="chart-grid">
+    <div class="panel chart-panel">
+      <div class="panel-hdr">SPEED vs TIME (m/s)</div>
+      <div class="chart-wrap"><canvas id="chart-speed"></canvas></div>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-hdr">ALTITUDE PROXY vs TIME (m)</div>
+      <div class="chart-wrap"><canvas id="chart-alt"></canvas></div>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-hdr">CONFIDENCE vs TIME</div>
+      <div class="chart-wrap"><canvas id="chart-conf"></canvas></div>
+    </div>
+    <div class="panel chart-panel">
+      <div class="panel-hdr">OBJECT COUNT vs TIME</div>
+      <div class="chart-wrap"><canvas id="chart-count"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Zone transition timeline -->
+  <div class="panel">
+    <div class="panel-hdr">ZONE TRANSITIONS</div>
+    <div id="zone-timeline" class="zone-timeline">
+      <p class="empty">No zone activity in the selected period.</p>
+    </div>
+  </div>
+</section>
+
+
+<script src="/static/js/app.js"></script>
 </body>
 </html>
